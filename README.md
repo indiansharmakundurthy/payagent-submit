@@ -52,7 +52,7 @@ flowchart LR
 Requires **Node.js 18+**. There is **nothing to install**: the project has zero dependencies.
 
 ```bash
-git clone <this-repo-url>
+git clone [<this-repo-url>](https://github.com/indiansharmakundurthy/payagent-submit)
 cd payagent
 cp .env.example .env      # Windows: copy .env.example .env
 # edit .env (see below), then:
