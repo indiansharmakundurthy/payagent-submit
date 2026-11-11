@@ -1,5 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PayAgent · AI shopping, paid with PayPal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/styles/ag-grid.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/styles/ag-theme-quartz.css"><script src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/dist/ag-grid-community.min.js"></script>
 <style>
 :root{--brand:#5b4cf5;--brand2:#ec4899;--amber:#f59e0b;--ink:#111827;--mut:#6b7280;--bg:#f5f6fb;--card:#fff;--line:#e8eaf3;--ok:#059669;--grad:linear-gradient(135deg,#5b4cf5 0%,#a855f7 50%,#ec4899 100%)}
 *{box-sizing:border-box}html{scroll-behavior:smooth}
@@ -78,8 +79,22 @@ footer{text-align:center;color:var(--mut);font-size:13px;padding:30px 0 10px}
 .m{padding:9px 13px;border-radius:14px;max-width:85%;font-size:14px;line-height:1.45;white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid var(--line)}.m.u{align-self:flex-end;background:var(--brand);color:#fff;border-color:var(--brand)}
 .cf{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}.cf input{flex:1;border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px;outline:0;min-width:0}.cf button{background:var(--brand);color:#fff;border-radius:12px;padding:0 16px;font-weight:700}
 @media(max-width:600px){.wiz{padding:22px}.search{flex-direction:column}.hero{padding-top:40px}}
+
+.tabs{display:flex;gap:6px;background:#f1f2fa;padding:4px;border-radius:14px}.tab{background:transparent;color:var(--mut);font-weight:700;font-size:14px;padding:8px 16px;border-radius:11px}.tab.on{background:#fff;color:var(--brand);box-shadow:0 2px 8px rgba(17,24,39,.08)}
+.cnt{background:var(--brand);color:#fff;border-radius:99px;font-size:11px;padding:2px 7px;margin-left:4px}
+.right{display:flex;gap:10px;align-items:center}.wal{background:#fff7e6;border:1px solid #fde4b0;color:#92400e;font-weight:700;font-size:13px;padding:8px 14px;border-radius:99px}.wal:hover{background:#ffefc7}
+.match{background:#ecfdf5;color:var(--ok)!important;padding:3px 9px;border-radius:99px;font-size:12px!important}
+.qrow{display:flex;justify-content:space-between;align-items:center;font-size:14px;color:var(--mut);font-weight:600}.qty{border:1px solid var(--line);border-radius:10px;padding:6px 8px;font-size:14px;background:#fff;margin-left:6px}.qt b{color:var(--ink);font-size:16px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px}.stat{background:#fff;border:1px solid var(--line);border-radius:18px;padding:18px}.stat span{color:var(--mut);font-size:13px;font-weight:600}.stat b{display:block;font-size:28px;letter-spacing:-.02em;margin-top:4px}
+.stat:nth-child(1) b{color:var(--brand)}.stat:nth-child(2) b{color:var(--ok)}.stat:nth-child(3) b{color:#d97706}.stat:nth-child(4) b{color:#0ea5e9}
+.gw{background:#fff;border:1px solid var(--line);border-radius:20px;padding:14px;box-shadow:0 8px 30px rgba(17,24,39,.05)}
+.sc{display:inline-block;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700}.sc.paid{background:#ecfdf5;color:#047857}.sc.ref{background:#fffbeb;color:#b45309}.sc.pen{background:#eef0f6;color:#4b5563}
+.ab{border:1px solid var(--line);background:#fff;border-radius:9px;padding:4px 10px;font-size:12px;font-weight:700;margin-right:6px;color:var(--ink)}.ab:hover{border-color:var(--brand);color:var(--brand)}.ab.rf:hover{border-color:#d97706;color:#d97706}
+.empty{text-align:center;padding:50px 10px;color:var(--mut)}.rcp{margin:8px 0;padding-left:18px}
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#111827;color:#fff;padding:12px 20px;border-radius:14px;font-weight:600;font-size:14px;z-index:60;opacity:0;pointer-events:none;transition:.3s}#toast.on{opacity:1}
+@media(max-width:760px){.right .pill{display:none}.tabs .tab{padding:8px 10px}}
 </style></head><body>
-<div class="nav"><div class="in"><div class="logo" id="home"><i>✦</i>PayAgent</div><span class="pill" id="mode">PayPal Sandbox</span></div></div>
+<div class="nav"><div class="in"><div class="logo" id="home"><i>✦</i>PayAgent</div><div class="tabs"><button class="tab on" id="tShop">Shop</button><button class="tab" id="tOrd">Orders <span class="cnt" id="oc">0</span></button></div><div class="right"><button class="wal" id="wal" title="Set your monthly budget">💰 <span id="walTxt">Set budget</span></button><span class="pill" id="mode">PayPal Sandbox</span></div></div></div><div id="toast"></div>
 <div class="wrap"><div id="banner"></div><div id="view"></div>
 <div class="trust"><span>🔒 Secure PayPal checkout</span><span>🌐 Live products from online stores</span><span>🛡️ AI budget guardrail</span><span>↩️ One-click refunds</span></div>
 <footer>PayAgent · built for the PayPal AI Hackathon · payments run in the PayPal Sandbox (demo, no real money)</footer></div>
@@ -90,8 +105,42 @@ const $=s=>document.querySelector(s),view=$('#view');
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const HEX={Black:'#111827',White:'#f3f4f6',Grey:'#9ca3af',Gray:'#9ca3af',Navy:'#1e3a8a',Silver:'#cbd5e1',Blue:'#2563eb',Red:'#dc2626',Green:'#16a34a',Pink:'#ec4899',Any:'conic-gradient(#ef4444,#f59e0b,#22c55e,#3b82f6,#a855f7,#ef4444)',Multi:'conic-gradient(#ef4444,#f59e0b,#22c55e,#3b82f6,#a855f7,#ef4444)'};
 const S={need:'',qs:[],i:0,ans:{},botMsg:''};
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+let UID=lsGet('pa_uid');if(!UID){UID=(window.crypto&&crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now());lsSet('pa_uid',UID)}
+let LIMIT=+lsGet('pa_limit')||0,SPENT=0,ORDERS=[];
+const money=n=>'$'+(+n).toFixed(2);
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),3200)}
+function setTab(t){$('#tShop').classList.toggle('on',t==='shop');$('#tOrd').classList.toggle('on',t==='orders')}
+function remaining(){return LIMIT?Math.max(0,+(LIMIT-SPENT).toFixed(2)):null}
+function paintWallet(){$('#oc').textContent=ORDERS.length;$('#walTxt').textContent=LIMIT?money(remaining())+' left of '+money(LIMIT):'Set budget'}
+async function loadOrders(){try{const r=await fetch('/api/orders?uid='+encodeURIComponent(UID));const j=await r.json();ORDERS=j.orders||[]}catch(e){ORDERS=[]}
+ SPENT=ORDERS.filter(o=>o.status==='COMPLETED').reduce((s,o)=>s+o.total,0);paintWallet()}
+$('#wal').onclick=()=>{const v=prompt('Set your monthly spending limit in USD. The AI agent can never exceed it. Enter 0 to remove.',LIMIT||'100');if(v===null)return;LIMIT=Math.max(0,parseFloat(v)||0);lsSet('pa_limit',String(LIMIT));paintWallet();toast(LIMIT?'Budget guardian set to '+money(LIMIT):'Budget limit removed')};
+function chipFor(s){return s==='COMPLETED'?'<span class="sc paid">Paid</span>':s==='REFUNDED'?'<span class="sc ref">Refunded</span>':'<span class="sc pen">'+esc(s==='CREATED'||s==='PAYER_ACTION_REQUIRED'?'Pending':s)+'</span>'}
+async function showOrders(){setTab('orders');
+ view.innerHTML='<div class="res-h"><div><h2>Your orders</h2><p style="color:var(--mut);margin:6px 0 0">Every purchase made through PayAgent, with PayPal status and one-click refunds.</p></div><button class="ghost" id="rl">↻ Refresh</button></div><div class="stats" id="stats"></div><div id="gw"></div>';
+ $('#rl').onclick=showOrders;await loadOrders();
+ const paid=ORDERS.filter(o=>o.status==='COMPLETED'),ref=ORDERS.filter(o=>o.status==='REFUNDED');
+ $('#stats').innerHTML=`<div class="stat"><span>Orders</span><b>${ORDERS.length}</b></div><div class="stat"><span>Total spent</span><b>${money(SPENT)}</b></div><div class="stat"><span>Refunded</span><b>${money(ref.reduce((s,o)=>s+o.total,0))}</b></div><div class="stat"><span>Budget left</span><b>${LIMIT?money(remaining()):'No limit'}</b></div>`;
+ if(!ORDERS.length){$('#gw').innerHTML='<div class="gw empty"><h3>No orders yet</h3><p>Find something you like and your orders will show up here.</p><button class="btn" id="go">Start shopping</button></div>';$('#go').onclick=intro;return}
+ const rows=ORDERS.map(o=>({...o,itemsTxt:(o.items||[]).map(i=>i.qty+'× '+i.name).join(', '),dateTxt:new Date(o.createdAt).toLocaleString()}));
+ if(window.agGrid&&agGrid.createGrid){
+  $('#gw').innerHTML='<div class="gw"><div id="grid" class="ag-theme-quartz" style="width:100%"></div></div>';
+  agGrid.createGrid($('#grid'),{rowData:rows,domLayout:'autoHeight',pagination:rows.length>8,paginationPageSize:8,defaultColDef:{sortable:true,filter:true,resizable:true},
+   columnDefs:[{headerName:'Date',field:'createdAt',valueGetter:p=>p.data.dateTxt,comparator:(a,b,x,y)=>x.data.createdAt-y.data.createdAt,sort:'desc',minWidth:170},
+    {headerName:'Items',field:'itemsTxt',flex:2,minWidth:220,tooltipField:'itemsTxt'},
+    {headerName:'Order ID',field:'id',minWidth:170},
+    {headerName:'Total',field:'total',valueFormatter:p=>money(p.value),type:'numericColumn',maxWidth:120},
+    {headerName:'Status',field:'status',cellRenderer:p=>{const d=document.createElement('span');d.innerHTML=chipFor(p.value);return d},maxWidth:130},
+    {headerName:'Actions',colId:'act',sortable:false,filter:false,minWidth:190,cellRenderer:p=>{const d=document.createElement('div');
+      const c=document.createElement('button');c.className='ab';c.textContent='Check';c.onclick=()=>orderAct('status',p.data.id);d.appendChild(c);
+      if(p.data.status==='COMPLETED'){const r=document.createElement('button');r.className='ab rf';r.textContent='Refund';r.onclick=()=>orderAct('refund',p.data.id);d.appendChild(r)}return d}}]});
+ }else{
+  $('#gw').innerHTML='<div class="gw" style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:14px"><tr style="text-align:left;color:var(--mut)"><th>Date</th><th>Items</th><th>Order</th><th>Total</th><th>Status</th></tr>'+rows.map(o=>`<tr style="border-top:1px solid var(--line)"><td style="padding:10px 6px">${esc(o.dateTxt)}</td><td>${esc(o.itemsTxt)}</td><td>${esc(o.id)}</td><td>${money(o.total)}</td><td>${chipFor(o.status)}</td></tr>`).join('')+'</table></div>'}}
+async function orderAct(kind,id){try{if(kind==='refund'&&!confirm('Refund this order via PayPal?'))return;const j=await api(kind==='refund'?'/api/refund':'/api/status',{order_id:id});
+ toast(j.error?'⚠️ '+j.error:kind==='refund'?'↩️ Refund '+j.status:'Status: '+(j.display_status||j.status));showOrders()}catch(e){toast('⚠️ '+e.message)}}
 async function api(p,b){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const j=await r.json();if(j.error&&r.status>=400)throw new Error(j.error);return j}
-function intro(){S.need='';S.qs=[];S.i=0;S.ans={};
+function intro(){setTab('shop');S.need='';S.qs=[];S.i=0;S.ans={};
  view.innerHTML=`<section class="hero"><span class="tag">✨ AI shopping agent · powered by PayPal</span>
  <h1>Tell us what you need. <span>We’ll find the best one.</span></h1>
  <p>Answer a few quick questions and PayAgent searches online stores, picks the best matches for you, and lets you pay securely with PayPal.</p>
@@ -124,18 +173,22 @@ async function results(){
  <div class="grid">${j.picks.map((p,i)=>`<article class="card"><span class="badge">${labels[i]||'Pick'}</span>
  <div class="pimg">${p.image?`<img src="${esc(p.image)}" alt="${esc(p.name)}" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${p.emoji||'🛍️'}'))">`:p.emoji}</div>
  <div class="body">${p.merchant?`<div class="store">${esc(p.merchant)}</div>`:''}<h3>${esc(p.name)}</h3>
- <div class="pr"><b>$${p.price.toFixed(2)}</b>${p.rating?`<span>★ ${p.rating}</span>`:''}</div>
+ <div class="pr"><b>$${p.price.toFixed(2)}</b>${p.rating?`<span>★ ${p.rating}</span>`:''}${p.score?`<span class="match">${p.score}% match</span>`:''}</div>
  ${p.colors&&p.colors.length?`<div class="dots">${p.colors.map(c=>`<span class="dot" title="${c}" style="background:${HEX[c]||'#999'}"></span>`).join('')}${esc(p.colors.join(', '))}</div>`:''}
  <ul class="f">${(p.features||[]).map(f=>`<li>${esc(f)}</li>`).join('')}</ul>
  <div class="why">✨ ${esc(p.why)}</div>
+ <div class="qrow"><label>Qty<select class="qty" data-p="${p.price}">${[1,2,3,4,5].map(n=>`<option>${n}</option>`).join('')}</select></label><span class="qt">Total <b>$${p.price.toFixed(2)}</b></span></div>
  <button class="pay" data-s="${esc(p.sku)}">Buy with <b>Pay<em>Pal</em></b></button>
  ${p.url?`<a class="view" href="${esc(p.url)}" target="_blank" rel="noopener">View at store ↗</a>`:''}</div></article>`).join('')}</div><div id="cerr"></div>`;
- view.querySelectorAll('.pay').forEach(b=>b.onclick=()=>buy(b));$('#again').onclick=intro;window.scrollTo({top:0,behavior:'smooth'})}catch(e){fail(e)}}
-async function buy(b){const old=b.innerHTML;b.disabled=true;b.textContent='Opening PayPal…';
- try{const j=await api('/api/checkout',{sku:b.dataset.s,qty:1,budget_usd:S.budget});if(j.error)throw new Error(j.error);if(!j.approve_url)throw new Error('No PayPal link returned');location.href=j.approve_url}
- catch(e){b.disabled=false;b.innerHTML=old;$('#cerr').innerHTML=`<div class="err">⚠️ ${esc(e.message)}</div>`}}
+ view.querySelectorAll('.pay').forEach(b=>b.onclick=()=>buy(b));view.querySelectorAll('.qty').forEach(s=>s.onchange=()=>{s.closest('.body').querySelector('.qt b').textContent='$'+(s.value*s.dataset.p).toFixed(2)});$('#again').onclick=intro;window.scrollTo({top:0,behavior:'smooth'})}catch(e){fail(e)}}
+async function buy(b){const body=b.closest('.body'),q=+(body.querySelector('.qty')?body.querySelector('.qty').value:1),old=b.innerHTML,rem=remaining();
+ if(LIMIT&&rem<=0){$('#cerr').innerHTML='<div class="err">🛡️ Budget guardian: your monthly limit of '+money(LIMIT)+' is used up. Raise it with the 💰 button to continue.</div>';return}
+ b.disabled=true;b.textContent='Opening PayPal…';
+ const caps=[S.budget,rem].filter(x=>x!=null&&x>0),cap=caps.length?Math.min(...caps):undefined;
+ try{const j=await api('/api/checkout',{sku:b.dataset.s,qty:q,budget_usd:cap,uid:UID});if(j.error)throw new Error(j.error);if(!j.approve_url)throw new Error('No PayPal link returned');location.href=j.approve_url}
+ catch(e){b.disabled=false;b.innerHTML=old;$('#cerr').innerHTML='<div class="err">🛡️ '+esc(e.message)+'</div>'}}
 function fail(e){view.innerHTML=`<div class="wiz"><h2>Something went wrong</h2><div class="err">${esc(e.message)}</div><div class="nav2"><button class="btn" id="again">Try again</button><span></span></div></div>`;$('#again').onclick=intro}
-$('#home').onclick=intro;
+$('#home').onclick=intro;$('#tShop').onclick=intro;$('#tOrd').onclick=showOrders;
 // chat widget
 const log=$('#log'),hist=[];function add(t,c){const d=document.createElement('div');d.className='m '+(c||'');d.textContent=t;log.appendChild(d);log.scrollTop=1e9;return d}
 add('Hi! 👋 I can answer questions, check an order or refund it. Try “status ORDERID”.');
@@ -144,9 +197,11 @@ $('#cf').onsubmit=async e=>{e.preventDefault();const v=$('#cq').value.trim();if(
  try{const j=await api('/api/chat',{messages:hist});w.textContent=j.reply;hist.push({role:'assistant',content:j.reply})}catch(e){w.textContent='⚠️ '+e.message}};
 // return from PayPal
 const sp=new URLSearchParams(location.search),paid=sp.get('paid');
-if(paid){$('#banner').innerHTML=`<div class="ok"><h3>🎉 Payment successful</h3><div>Your PayPal Sandbox payment was captured. Order ID: <b>${esc(paid)}</b></div><div class="row"><button class="ghost" id="st">Check status</button><button class="ghost" id="rf">Refund this order</button></div><div id="res" style="margin-top:10px;font-weight:600"></div></div>`;
- $('#st').onclick=async()=>{const j=await api('/api/status',{order_id:paid});$('#res').textContent=j.error?'⚠️ '+j.error:`Status: ${j.status} · payment ${j.capture_status||'n/a'}`};
- $('#rf').onclick=async()=>{const j=await api('/api/refund',{order_id:paid});$('#res').textContent=j.error?'⚠️ '+j.error:`↩️ Refund ${j.refund_id}: ${j.status}`}}
+if(paid){$('#banner').innerHTML=`<div class="ok"><h3>🎉 Payment successful</h3><div id="rc">Your PayPal Sandbox payment was captured. Order ID: <b>${esc(paid)}</b></div><div class="row"><button class="ghost" id="st">Check status</button><button class="ghost" id="rf">Refund this order</button><button class="ghost" id="vo">View all orders →</button></div><div id="res" style="margin-top:10px;font-weight:600"></div></div>`;
+ api('/api/status',{order_id:paid}).then(j=>{if(j.items){$('#rc').innerHTML+='<ul class="rcp">'+j.items.map(i=>'<li>'+i.qty+'× '+esc(i.name)+' <b>'+money(i.price*i.qty)+'</b></li>').join('')+'</ul><div>Total paid: <b>'+money(j.total)+'</b></div>'}}).catch(()=>{});
+ $('#st').onclick=async()=>{const j=await api('/api/status',{order_id:paid});$('#res').textContent=j.error?'⚠️ '+j.error:'Status: '+j.status+' · payment '+(j.capture_status||'n/a')};
+ $('#rf').onclick=async()=>{const j=await api('/api/refund',{order_id:paid});$('#res').textContent=j.error?'⚠️ '+j.error:'↩️ Refund '+j.refund_id+': '+j.status;loadOrders()};
+ $('#vo').onclick=showOrders;try{history.replaceState(null,'','/')}catch(e){}}
 if(sp.get('cancelled'))$('#banner').innerHTML='<div class="err">Payment was cancelled. You can pick again below.</div>';
-intro();
+intro();loadOrders();
 </script></body></html>
