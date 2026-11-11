@@ -2,7 +2,8 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import { openDB } from './db.js';
 import { fileURLToPath } from 'node:url';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
@@ -35,9 +36,10 @@ const CATALOG = [
 ];
 const ALL_COLORS = ['Black', 'White', 'Grey', 'Navy', 'Silver', 'Blue', 'Red'];
 const orders = new Map();
-const DATA_FILE = path.join(__dir, 'data', 'orders.json');
-try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')))) orders.set(k, v); } catch {}
-const saveOrders = () => { try { fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(Object.fromEntries(orders))); } catch {} };
+const store = await openDB(path.join(__dir, 'data'));
+try { for (const o of store.loadOrders()) orders.set(o.id, o); } catch (e) { console.error('Could not load orders:', e.message); }
+const saveOrders = () => { try { store.saveOrders([...orders.values()]); } catch (e) { console.error('Could not save orders:', e.message); } };
+store.cleanSessions(); setInterval(() => store.cleanSessions(), 36e5).unref();
 const clampScore = v => { const n = Math.round(+v); return n >= 50 && n <= 99 ? n : undefined; };
 const productCache = new Map(); // live (Channel3) products by sku, so checkout can price them server-side
 
@@ -74,6 +76,15 @@ const tools = {
     return (hits.length ? hits : CATALOG).map(({ sku, name, price, cat, colors }) => ({ sku, name, price, cat, colors }));
   },
   async create_checkout({ items, budget_usd, uid }) {
+    const user = uid ? store.userById(uid) : null;
+    if (!user) return { error: 'Please sign in to check out.' };
+    if (!user.address?.line1) return { error: 'Please add your shipping address in Account before checking out.' };
+    if (user.budget > 0) {
+      const spent = [...orders.values()].filter(o => o.userId === user.id && o.status === 'COMPLETED').reduce((a, o) => a + o.total, 0);
+      const rem = +(user.budget - spent).toFixed(2);
+      if (rem <= 0) return { error: `Budget guardian: your monthly limit of $${user.budget} is used up.` };
+      budget_usd = budget_usd ? Math.min(budget_usd, rem) : rem;
+    }
     const lines = [];
     for (const it of items || []) {
       const p = CATALOG.find(c => c.sku === it.sku) || productCache.get(it.sku);
@@ -94,11 +105,14 @@ const tools = {
       payment_source: { paypal: { experience_context: { brand_name: 'PayAgent', user_action: 'PAY_NOW', return_url: BASE + '/return', cancel_url: BASE + '/?cancelled=1' } } },
     });
     const link = (o.links || []).find(l => ['payer-action', 'approve'].includes(l.rel))?.href;
-    orders.set(o.id, { id: o.id, uid: uid || null, items: lines.map(l => ({ sku: l.sku, name: l.name, qty: l.qty, price: l.price })), total, status: o.status, createdAt: Date.now() });
+    orders.set(o.id, { id: o.id, userId: user.id, shipTo: { name: user.name, phone: user.phone, address: user.address }, items: lines.map(l => ({ sku: l.sku, name: l.name, qty: l.qty, price: l.price })), total, status: o.status, createdAt: Date.now() });
     saveOrders();
     return { order_id: o.id, total_usd: total, status: o.status, approve_url: link };
   },
-  async order_status({ order_id }) {
+  async order_status({ order_id, uid }) {
+    if (!uid) return { error: 'Please sign in to view orders.' };
+    const own = orders.get(order_id);
+    if (!own || own.userId !== uid) return { error: 'Order not found on your account.' };
     const o = await pp('/v2/checkout/orders/' + order_id);
     const cap = o.purchase_units?.[0]?.payments?.captures?.[0];
     const rec = orders.get(order_id);
@@ -107,11 +121,13 @@ const tools = {
       rec.status = /REFUND/.test(cap?.status || '') ? 'REFUNDED' : (cap?.status === 'COMPLETED' ? 'COMPLETED' : o.status);
       saveOrders();
     }
-    return { order_id, status: o.status, capture_id: cap?.id, capture_status: cap?.status, items: rec?.items, total: rec?.total, display_status: rec?.status };
+    return { order_id, status: o.status, capture_id: cap?.id, capture_status: cap?.status, items: rec?.items, total: rec?.total, display_status: rec?.status, shipTo: rec?.shipTo };
   },
-  async refund_order({ order_id, reason }) {
+  async refund_order({ order_id, reason, uid }) {
+    if (!uid) return { error: 'Please sign in to refund an order.' };
+    if (orders.get(order_id)?.userId !== uid) return { error: 'Order not found on your account.' };
     let capId = orders.get(order_id)?.captureId;
-    if (!capId) capId = (await tools.order_status({ order_id })).capture_id;
+    if (!capId) capId = (await tools.order_status({ order_id, uid })).capture_id;
     if (!capId) return { error: 'Order has not been paid/captured yet, nothing to refund.' };
 let r;
 try { r = await pp(`/v2/payments/captures/${capId}/refund`, 'POST', { note_to_payer: (reason || 'Refund requested via PayAgent').slice(0, 255) }); }
@@ -119,7 +135,7 @@ catch (e) { if (/CAPTURE_FULLY_REFUNDED/.test(e.message)) return { error: 'This 
     return { refund_id: r.id, status: r.status };
   },
 };
-async function runTool(name, input) { try { return await tools[name](input || {}); } catch (e) { return { error: e.message }; } }
+async function runTool(name, input, ctx) { try { const a = { ...(input || {}) }; if (ctx?.uid) a.uid = ctx.uid; else delete a.uid; return await tools[name](a); } catch (e) { return { error: e.message }; } }
 
 const toolDefs = [
   { name: 'search_products', description: 'Search the store catalog.', input_schema: { type: 'object', properties: { query: { type: 'string' } } } },
@@ -130,24 +146,38 @@ const toolDefs = [
 const SYSTEM = `You are PayAgent, a concise shopping and payments agent. Catalog SKUs: ${CATALOG.map(c => `${c.sku} ($${c.price})`).join(', ')}. Use tools to search, create PayPal checkouts, check status and refund. Always pass budget_usd when the user states a budget. After create_checkout, show the total and approve_url as a plain link. Never invent order IDs.`;
 
 // ---------- AI helpers ----------
-const hasAI = () => !!(process.env.AI_API_KEY || process.env.ANTHROPIC_API_KEY);
-async function askAI(system, user) { // plain text completion, null on any failure
-  try {
-    if (process.env.AI_API_KEY) {
-      const r = await fetch((process.env.AI_BASE_URL || 'https://api.groq.com/openai/v1') + '/chat/completions', {
-        method: 'POST', headers: { Authorization: 'Bearer ' + process.env.AI_API_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: process.env.AI_MODEL, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-      });
-      return (await r.json()).choices?.[0]?.message?.content || null;
-    }
-    if (process.env.ANTHROPIC_API_KEY) {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST', headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system, messages: [{ role: 'user', content: user }] }),
-      });
-      return (await r.json()).content?.filter(b => b.type === 'text').map(b => b.text).join('\n') || null;
-    }
-  } catch (e) { console.error('AI error', e.message); }
+function providers() {
+  const e = process.env, p = [];
+  if (e.AI_API_KEY) p.push({ name: 'Groq', kind: 'openai', base: e.AI_BASE_URL || 'https://api.groq.com/openai/v1', key: e.AI_API_KEY, model: e.AI_MODEL });
+  if (e.GEMINI_API_KEY) p.push({ name: 'Gemini', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: e.GEMINI_API_KEY, model: e.GEMINI_MODEL || 'gemini-2.0-flash' });
+  if (e.OPENROUTER_API_KEY) p.push({ name: 'OpenRouter', kind: 'openai', base: 'https://openrouter.ai/api/v1', key: e.OPENROUTER_API_KEY, model: e.OPENROUTER_MODEL || 'openai/gpt-oss-120b:free' });
+  if (e.ANTHROPIC_API_KEY) p.push({ name: 'Claude', kind: 'anthropic', key: e.ANTHROPIC_API_KEY, model: CLAUDE_MODEL });
+  return p;
+}
+const hasAI = () => providers().length > 0;
+let lastAI = '';
+async function oaiPost(p, body) {
+  const r = await fetch(p.base + '/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer ' + p.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: p.model, ...body }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`${p.name} ${r.status}: ${JSON.stringify(j).slice(0, 200)}`);
+  return j;
+}
+async function claudePost(p, body) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': p.key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: p.model, max_tokens: 1024, ...body }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Claude ${r.status}: ${JSON.stringify(j).slice(0, 200)}`);
+  return j;
+}
+// Multi-model router: tries each configured AI in order and fails over on errors or rate limits.
+async function askAI(system, user) {
+  for (const p of providers()) {
+    try {
+      const out = p.kind === 'anthropic'
+        ? (await claudePost(p, { system, messages: [{ role: 'user', content: user }] })).content?.filter(b => b.type === 'text').map(b => b.text).join('\n')
+        : (await oaiPost(p, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }] })).choices?.[0]?.message?.content;
+      if (out) { lastAI = p.name; return out; }
+    } catch (e) { console.error('AI provider failed, trying next:', e.message); }
+  }
   return null;
 }
 function parseJSON(t) { try { const m = t && t.match(/[\[{][\s\S]*[\]}]/); return m ? JSON.parse(m[0]) : null; } catch { return null; } }
@@ -259,48 +289,42 @@ async function recommend(need, answers) {
 }
 
 // ---------- Chat agent (status / refund / free-form) ----------
-async function claudeChat(messages) {
-  const msgs = messages.map(m => ({ role: m.role, content: m.content }));
-  for (let i = 0; i < 6; i++) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: SYSTEM, tools: toolDefs, messages: msgs }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error('AI error: ' + JSON.stringify(j).slice(0, 300));
-    msgs.push({ role: 'assistant', content: j.content });
-    if (j.stop_reason !== 'tool_use') return j.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-    const results = [];
-    for (const b of j.content.filter(b => b.type === 'tool_use')) results.push({ type: 'tool_result', tool_use_id: b.id, content: JSON.stringify(await runTool(b.name, b.input)) });
-    msgs.push({ role: 'user', content: results });
+async function chatWith(p, messages, ctx) {
+  if (p.kind === 'anthropic') {
+    const msgs = messages.map(m => ({ role: m.role, content: m.content }));
+    for (let i = 0; i < 6; i++) {
+      const j = await claudePost(p, { system: SYSTEM, tools: toolDefs, messages: msgs });
+      msgs.push({ role: 'assistant', content: j.content });
+      if (j.stop_reason !== 'tool_use') return j.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      const results = [];
+      for (const b of j.content.filter(b => b.type === 'tool_use')) results.push({ type: 'tool_result', tool_use_id: b.id, content: JSON.stringify(await runTool(b.name, b.input, ctx)) });
+      msgs.push({ role: 'user', content: results });
+    }
+    return 'Sorry, I could not finish that.';
   }
-  return 'Sorry, I could not finish that.';
-}
-async function openaiChat(messages) {
   const msgs = [{ role: 'system', content: SYSTEM }, ...messages.map(m => ({ role: m.role, content: m.content }))];
   const oaTools = toolDefs.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   for (let i = 0; i < 6; i++) {
-    const r = await fetch((process.env.AI_BASE_URL || 'https://api.groq.com/openai/v1') + '/chat/completions', {
-      method: 'POST', headers: { Authorization: 'Bearer ' + process.env.AI_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: process.env.AI_MODEL, messages: msgs, tools: oaTools }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error('AI error: ' + JSON.stringify(j).slice(0, 300));
-    const m = j.choices[0].message;
+    const m = (await oaiPost(p, { messages: msgs, tools: oaTools })).choices[0].message;
     msgs.push({ role: 'assistant', content: m.content || '', tool_calls: m.tool_calls });
     if (!m.tool_calls?.length) return m.content || '';
     for (const c of m.tool_calls) {
       let args = {}; try { args = JSON.parse(c.function.arguments || '{}'); } catch {}
-      msgs.push({ role: 'tool', tool_call_id: c.id, content: JSON.stringify(await runTool(c.function.name, args)) });
+      msgs.push({ role: 'tool', tool_call_id: c.id, content: JSON.stringify(await runTool(c.function.name, args, ctx)) });
     }
   }
   return 'Sorry, I could not finish that.';
 }
-async function demoChat(messages) {
+async function agentChat(messages, ctx) {
+  let last;
+  for (const p of providers()) { try { const r = await chatWith(p, messages, ctx); lastAI = p.name; return r; } catch (e) { last = e; console.error('Chat provider failed, trying next:', e.message); } }
+  throw last || new Error('No AI configured');
+}
+async function demoChat(messages, ctx) {
   const text = messages[messages.length - 1].content.toLowerCase();
   const id = (text.match(/\b[0-9A-Z]{17}\b/i) || [])[0]?.toUpperCase();
-  if (/refund/.test(text) && id) { const r = await runTool('refund_order', { order_id: id }); return r.error ? '⚠️ ' + r.error : `✅ Refund ${r.refund_id} is ${r.status}.`; }
-  if (/status|paid/.test(text) && id) { const r = await runTool('order_status', { order_id: id }); return r.error ? '⚠️ ' + r.error : `Order ${id}: ${r.status}${r.capture_status ? ' (payment ' + r.capture_status + ')' : ''}`; }
+  if (/refund/.test(text) && id) { const r = await runTool('refund_order', { order_id: id }, ctx); return r.error ? '⚠️ ' + r.error : `✅ Refund ${r.refund_id} is ${r.status}.`; }
+  if (/status|paid/.test(text) && id) { const r = await runTool('order_status', { order_id: id }, ctx); return r.error ? '⚠️ ' + r.error : `Order ${id}: ${r.status}${r.capture_status ? ' (payment ' + r.capture_status + ')' : ''}`; }
   return 'Demo mode (no AI key). Use the shopping flow above, or type "status ORDERID" / "refund ORDERID".';
 }
 
@@ -314,6 +338,28 @@ function smallTalk(t) {
   return null;
 }
 
+// ---------- Auth ----------
+const hashPw = pw => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(pw, salt, 64).toString('hex'); };
+const checkPw = (pw, stored) => { try { const [salt, h] = String(stored).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(pw, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } };
+const sha = t => createHash('sha256').update(t).digest('hex');
+const cookieOf = req => Object.fromEntries(String(req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(x => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
+const pub = u => u && { id: u.id, name: u.name, email: u.email, phone: u.phone, address: u.address || {}, budget: u.budget || 0, isDemo: !!u.isDemo };
+function getUser(req) { const t = cookieOf(req).pa_sid; if (!t) return null; const s = store.session(sha(t)); if (!s || s.expires < Date.now()) return null; return store.userById(s.userId); }
+function startSession(res, userId) { const t = randomBytes(32).toString('hex'); store.addSession(sha(t), userId, Date.now() + 7 * 864e5); res.setHeader('Set-Cookie', `pa_sid=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${BASE.startsWith('https') ? '; Secure' : ''}`); }
+const clean = (v, n) => String(v ?? '').trim().slice(0, n);
+function validProfile(b, isNew) {
+  const name = clean(b.name, 80), email = clean(b.email, 120).toLowerCase(), phone = clean(b.phone, 25), a = b.address || {};
+  const address = { line1: clean(a.line1, 120), city: clean(a.city, 60), state: clean(a.state, 60), postal: clean(a.postal, 15), country: clean(a.country, 60) };
+  if (name.length < 2) return { error: 'Please enter your full name.' };
+  if (isNew && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { error: 'Please enter a valid email address.' };
+  if (!/^\+?[0-9 ()-]{7,20}$/.test(phone)) return { error: 'Please enter a valid phone number (7 to 15 digits).' };
+  if (!address.line1 || !address.city || !address.postal || !address.country) return { error: 'Please complete your shipping address (street, city, postal code and country).' };
+  if (isNew && String(b.password || '').length < 8) return { error: 'Password must be at least 8 characters.' };
+  return { name, email, phone, address };
+}
+const authHits = new Map();
+function authRateOk(ip) { const now = Date.now(); const h = authHits.get(ip) || { n: 0, t: now }; if (now - h.t > 60000) { h.n = 0; h.t = now; } h.n++; authHits.set(ip, h); return h.n <= 20; }
+
 // ---------- HTTP ----------
 const hits = new Map();
 function rateOk(ip) { const now = Date.now(); const h = hits.get(ip) || { n: 0, t: now }; if (now - h.t > 60000) { h.n = 0; h.t = now; } h.n++; hits.set(ip, h); return h.n <= 90; }
@@ -323,20 +369,53 @@ http.createServer(async (req, res) => {
   const send = (code, body, type = 'application/json') => { res.writeHead(code, { 'Content-Type': type }); res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)); };
   const readBody = async () => { let raw = ''; for await (const c of req) { raw += c; if (raw.length > 1e6) throw new Error('Request too large'); } return raw ? JSON.parse(raw) : {}; };
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  const me = getUser(req);
   res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
   try {
     if (url.pathname === '/health') return send(200, { ok: true });
     if (url.pathname.startsWith('/api/') && !rateOk(ip)) return send(429, { error: 'Too many requests, please slow down for a moment.' });
-    if (url.pathname === '/api/orders') { const uid = url.searchParams.get('uid'); const list = [...orders.values()].filter(o => uid && o.uid === uid).sort((a, b) => b.createdAt - a.createdAt); return send(200, { orders: list }); }
-    if (req.method === 'POST' && url.pathname === '/api/questions') { const { need } = await readBody(); const talk = smallTalk(String(need || '')); if (talk) return send(200, { chat: true, reply: talk }); return send(200, { questions: await questionsFor(String(need || '')), ai: hasAI() }); }
+    if (url.pathname.startsWith('/api/auth/') && !authRateOk(ip)) return send(429, { error: 'Too many attempts, please wait a minute.' });
+    if (url.pathname === '/api/me') return send(200, { user: pub(me) });
+    if (req.method === 'POST' && url.pathname === '/api/auth/register') {
+      const b = await readBody(); const v = validProfile(b, true); if (v.error) return send(400, v);
+      if (store.userByEmail(v.email)) return send(409, { error: 'An account with this email already exists. Please sign in.' });
+      const u = { id: randomUUID(), email: v.email, name: v.name, phone: v.phone, address: v.address, hash: hashPw(String(b.password)), budget: 0, createdAt: Date.now() };
+      try { store.addUser(u); } catch { return send(409, { error: 'An account with this email already exists. Please sign in.' }); }
+      startSession(res, u.id); return send(200, { user: pub(u) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+      const b = await readBody(); const u = store.userByEmail(clean(b.email, 120).toLowerCase());
+      if (!u || !checkPw(String(b.password || ''), u.hash)) return send(401, { error: 'Incorrect email or password.' });
+      startSession(res, u.id); return send(200, { user: pub(u) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/demo') {
+      const id = randomUUID();
+      const u = { id, email: `demo-${id.slice(0, 8)}@payagent.demo`, name: 'Demo Shopper', phone: '+1 555 010 0199', address: { line1: '1 Market Street', city: 'San Francisco', state: 'CA', postal: '94105', country: 'United States' }, hash: hashPw(randomBytes(12).toString('hex')), budget: 0, createdAt: Date.now(), isDemo: true };
+      store.addUser(u); startSession(res, u.id); return send(200, { user: pub(u) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+      const t = cookieOf(req).pa_sid; if (t) store.delSession(sha(t));
+      res.setHeader('Set-Cookie', 'pa_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); return send(200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/profile') {
+      if (!me) return send(401, { error: 'Please sign in.' });
+      const b = await readBody();
+      if (b.budget !== undefined) me.budget = Math.max(0, Math.min(100000, +b.budget || 0));
+      if (b.name !== undefined) { const v = validProfile({ ...b, email: me.email }, false); if (v.error) return send(400, v); Object.assign(me, { name: v.name, phone: v.phone, address: v.address }); }
+      store.saveUser(me); return send(200, { user: pub(me) });
+    }
+    if (url.pathname === '/api/orders') { const list = me ? [...orders.values()].filter(o => o.userId === me.id).sort((a, b) => b.createdAt - a.createdAt) : []; return send(200, { orders: list, signedIn: !!me }); }
+    if (req.method === 'POST' && url.pathname === '/api/questions') { const { need } = await readBody(); const talk = smallTalk(String(need || '')); if (talk) return send(200, { chat: true, reply: talk }); return send(200, { questions: await questionsFor(String(need || '')), ai: hasAI(), providers: providers().map(p => p.name) }); }
     if (req.method === 'POST' && url.pathname === '/api/recommend') { const { need, answers } = await readBody(); return send(200, await recommend(String(need || ''), answers || {})); }
-    if (req.method === 'POST' && url.pathname === '/api/checkout') { const { sku, qty, budget_usd, uid } = await readBody(); return send(200, await runTool('create_checkout', { items: [{ sku, qty: qty || 1 }], budget_usd, uid })); }
-    if (req.method === 'POST' && url.pathname === '/api/refund') { const { order_id } = await readBody(); return send(200, await runTool('refund_order', { order_id })); }
-    if (req.method === 'POST' && url.pathname === '/api/status') { const { order_id } = await readBody(); return send(200, await runTool('order_status', { order_id })); }
+    if (req.method === 'POST' && url.pathname === '/api/checkout') { const { sku, qty, budget_usd } = await readBody(); if (!me) return send(401, { error: 'Please sign in to check out.' }); return send(200, await runTool('create_checkout', { items: [{ sku, qty: qty || 1 }], budget_usd }, { uid: me.id })); }
+    if (req.method === 'POST' && url.pathname === '/api/refund') { const { order_id } = await readBody(); return send(200, await runTool('refund_order', { order_id }, { uid: me?.id })); }
+    if (req.method === 'POST' && url.pathname === '/api/status') { const { order_id } = await readBody(); return send(200, await runTool('order_status', { order_id }, { uid: me?.id })); }
     if (req.method === 'POST' && url.pathname === '/api/chat') {
-      const { messages } = await readBody();
-      const ai = process.env.AI_API_KEY ? openaiChat : process.env.ANTHROPIC_API_KEY ? claudeChat : null;
-      return send(200, { reply: ai ? await ai(messages) : await demoChat(messages), mode: ai ? 'ai' : 'demo' });
+      const { messages } = await readBody(); const ctx = { uid: me?.id };
+      let reply = null;
+      if (hasAI()) { try { reply = await agentChat(messages, ctx); } catch (e) { console.error(e.message); } }
+      if (reply == null) reply = await demoChat(messages, ctx);
+      return send(200, { reply, mode: hasAI() ? 'ai' : 'demo', provider: lastAI || null });
     }
     if (url.pathname === '/api/catalog') return send(200, CATALOG);
     if (url.pathname === '/return') {
