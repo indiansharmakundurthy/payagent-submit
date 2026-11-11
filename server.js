@@ -35,6 +35,10 @@ const CATALOG = [
 ];
 const ALL_COLORS = ['Black', 'White', 'Grey', 'Navy', 'Silver', 'Blue', 'Red'];
 const orders = new Map();
+const DATA_FILE = path.join(__dir, 'data', 'orders.json');
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')))) orders.set(k, v); } catch {}
+const saveOrders = () => { try { fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(Object.fromEntries(orders))); } catch {} };
+const clampScore = v => { const n = Math.round(+v); return n >= 50 && n <= 99 ? n : undefined; };
 const productCache = new Map(); // live (Channel3) products by sku, so checkout can price them server-side
 
 // ---------- PayPal ----------
@@ -69,7 +73,7 @@ const tools = {
     const hits = CATALOG.filter(p => !q.length || q.some(w => (p.name + ' ' + p.tags).toLowerCase().includes(w)));
     return (hits.length ? hits : CATALOG).map(({ sku, name, price, cat, colors }) => ({ sku, name, price, cat, colors }));
   },
-  async create_checkout({ items, budget_usd }) {
+  async create_checkout({ items, budget_usd, uid }) {
     const lines = [];
     for (const it of items || []) {
       const p = CATALOG.find(c => c.sku === it.sku) || productCache.get(it.sku);
@@ -90,14 +94,20 @@ const tools = {
       payment_source: { paypal: { experience_context: { brand_name: 'PayAgent', user_action: 'PAY_NOW', return_url: BASE + '/return', cancel_url: BASE + '/?cancelled=1' } } },
     });
     const link = (o.links || []).find(l => ['payer-action', 'approve'].includes(l.rel))?.href;
-    orders.set(o.id, { items: lines, total, status: o.status });
+    orders.set(o.id, { id: o.id, uid: uid || null, items: lines.map(l => ({ sku: l.sku, name: l.name, qty: l.qty, price: l.price })), total, status: o.status, createdAt: Date.now() });
+    saveOrders();
     return { order_id: o.id, total_usd: total, status: o.status, approve_url: link };
   },
   async order_status({ order_id }) {
     const o = await pp('/v2/checkout/orders/' + order_id);
     const cap = o.purchase_units?.[0]?.payments?.captures?.[0];
-    if (cap && orders.has(order_id)) orders.get(order_id).captureId = cap.id;
-    return { order_id, status: o.status, capture_id: cap?.id, capture_status: cap?.status };
+    const rec = orders.get(order_id);
+    if (rec) {
+      if (cap) rec.captureId = cap.id;
+      rec.status = /REFUND/.test(cap?.status || '') ? 'REFUNDED' : (cap?.status === 'COMPLETED' ? 'COMPLETED' : o.status);
+      saveOrders();
+    }
+    return { order_id, status: o.status, capture_id: cap?.id, capture_status: cap?.status, items: rec?.items, total: rec?.total, display_status: rec?.status };
   },
   async refund_order({ order_id, reason }) {
     let capId = orders.get(order_id)?.captureId;
@@ -105,7 +115,8 @@ const tools = {
     if (!capId) return { error: 'Order has not been paid/captured yet, nothing to refund.' };
 let r;
 try { r = await pp(`/v2/payments/captures/${capId}/refund`, 'POST', { note_to_payer: (reason || 'Refund requested via PayAgent').slice(0, 255) }); }
-catch (e) { if (/CAPTURE_FULLY_REFUNDED/.test(e.message)) return { error: 'This order was already refunded.' }; throw e; }    return { refund_id: r.id, status: r.status };
+catch (e) { if (/CAPTURE_FULLY_REFUNDED/.test(e.message)) return { error: 'This order was already refunded.' }; throw e; }    const rrec = orders.get(order_id); if (rrec) { rrec.status = 'REFUNDED'; rrec.refundId = r.id; saveOrders(); }
+    return { refund_id: r.id, status: r.status };
   },
 };
 async function runTool(name, input) { try { return await tools[name](input || {}); } catch (e) { return { error: e.message }; } }
@@ -179,10 +190,10 @@ async function recommendCatalog(need, answers) {
   let picks = sorted.slice(0, 3).map(p => ({ ...p, why: `Fits your ${answers.budget || 'budget'}${colour ? ' and ' + colour.toLowerCase() + ' choice' : ''}; rated ${p.rating}/5.` }));
   if (hasAI() && sorted.length > 1) {
     const cand = sorted.slice(0, 8).map(p => ({ sku: p.sku, name: p.name, price: p.price, rating: p.rating, features: p.features }));
-    const t = await askAI('You are a shopping assistant. From the candidates, pick the best 3 (or fewer) for the customer. Output ONLY JSON: [{"sku":"...","why":"one friendly sentence under 20 words"}]. Use only given skus.', `Customer wants: ${need}\nAnswers: ${JSON.stringify(answers)}\nCandidates: ${JSON.stringify(cand)}`);
+    const t = await askAI('You are a shopping assistant. From the candidates, pick the best 3 (or fewer) for the customer. Output ONLY JSON: [{"sku":"...","why":"one friendly sentence under 20 words","score":85}] where score is your match percentage 60-99. Use only given skus.', `Customer wants: ${need}\nAnswers: ${JSON.stringify(answers)}\nCandidates: ${JSON.stringify(cand)}`);
     const j = parseJSON(t);
     if (Array.isArray(j)) {
-      const ai = j.map(x => { const p = c.find(q => q.sku === x?.sku); return p && { ...p, why: String(x.why || picks[0].why).slice(0, 160) }; }).filter(Boolean).slice(0, 3);
+      const ai = j.map(x => { const p = c.find(q => q.sku === x?.sku); return p && { ...p, why: String(x.why || picks[0].why).slice(0, 160), score: clampScore(x.score) }; }).filter(Boolean).slice(0, 3);
       if (ai.length) picks = ai;
     }
   }
@@ -224,21 +235,27 @@ async function liveRecommend(need, answers) {
   let picks = items.slice(0, 3).map(p => ({ ...p, why: `Matches "${q}" at $${p.price.toFixed(2)}${p.merchant ? ' from ' + p.merchant : ''}.` }));
   if (hasAI() && items.length > 3) {
     const cand = items.slice(0, 10).map(p => ({ sku: p.sku, name: p.name, price: p.price, features: p.features }));
-    const j = parseJSON(await askAI('You are a shopping assistant. Pick the best 3 for the customer. Output ONLY JSON: [{"sku":"...","why":"one friendly sentence under 20 words"}]. Use only given skus.', `Customer wants: ${need}\nAnswers: ${JSON.stringify(answers)}\nCandidates: ${JSON.stringify(cand)}`));
+    const j = parseJSON(await askAI('You are a shopping assistant. Pick the best 3 for the customer. Output ONLY JSON: [{"sku":"...","why":"one friendly sentence under 20 words","score":85}] where score is your match percentage 60-99. Use only given skus.', `Customer wants: ${need}\nAnswers: ${JSON.stringify(answers)}\nCandidates: ${JSON.stringify(cand)}`));
     if (Array.isArray(j)) {
-      const ai = j.map(x => { const p = items.find(q => q.sku === x?.sku); return p && { ...p, why: String(x.why || '').slice(0, 160) || picks[0].why }; }).filter(Boolean).slice(0, 3);
+      const ai = j.map(x => { const p = items.find(q => q.sku === x?.sku); return p && { ...p, why: String(x.why || '').slice(0, 160) || picks[0].why, score: clampScore(x.score) }; }).filter(Boolean).slice(0, 3);
       if (ai.length) picks = ai;
     }
   }
   return { picks, budget_max: b.max || null, source: 'live', query: q };
 }
-async function recommend(need, answers) {
+async function recommendRaw(need, answers) {
   if (process.env.CHANNEL3_API_KEY) {
     let note = '';
     try { const r = await liveRecommend(need, answers); if (r && !r.fail) return r; note = r?.fail || 'no results'; } catch (e) { note = e.message; console.error('Live search failed, using catalog:', e.message); }
     const out = await recommendCatalog(need, answers); out.live_note = note.replace(process.env.CHANNEL3_API_KEY, '***'); return out;
   }
   const out = await recommendCatalog(need, answers); out.live_note = 'CHANNEL3_API_KEY not loaded by the server'; return out;
+}
+
+async function recommend(need, answers) {
+  const r = await recommendRaw(need, answers);
+  (r.picks || []).forEach((p, i) => { if (!p.score) p.score = [94, 89, 84][i] || 80; });
+  return r;
 }
 
 // ---------- Chat agent (status / refund / free-form) ----------
@@ -298,15 +315,22 @@ function smallTalk(t) {
 }
 
 // ---------- HTTP ----------
+const hits = new Map();
+function rateOk(ip) { const now = Date.now(); const h = hits.get(ip) || { n: 0, t: now }; if (now - h.t > 60000) { h.n = 0; h.t = now; } h.n++; hits.set(ip, h); return h.n <= 90; }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 http.createServer(async (req, res) => {
   const url = new URL(req.url, BASE);
   const send = (code, body, type = 'application/json') => { res.writeHead(code, { 'Content-Type': type }); res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)); };
-  const readBody = async () => { let raw = ''; for await (const c of req) raw += c; return raw ? JSON.parse(raw) : {}; };
+  const readBody = async () => { let raw = ''; for await (const c of req) { raw += c; if (raw.length > 1e6) throw new Error('Request too large'); } return raw ? JSON.parse(raw) : {}; };
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
   try {
+    if (url.pathname === '/health') return send(200, { ok: true });
+    if (url.pathname.startsWith('/api/') && !rateOk(ip)) return send(429, { error: 'Too many requests, please slow down for a moment.' });
+    if (url.pathname === '/api/orders') { const uid = url.searchParams.get('uid'); const list = [...orders.values()].filter(o => uid && o.uid === uid).sort((a, b) => b.createdAt - a.createdAt); return send(200, { orders: list }); }
     if (req.method === 'POST' && url.pathname === '/api/questions') { const { need } = await readBody(); const talk = smallTalk(String(need || '')); if (talk) return send(200, { chat: true, reply: talk }); return send(200, { questions: await questionsFor(String(need || '')), ai: hasAI() }); }
     if (req.method === 'POST' && url.pathname === '/api/recommend') { const { need, answers } = await readBody(); return send(200, await recommend(String(need || ''), answers || {})); }
-    if (req.method === 'POST' && url.pathname === '/api/checkout') { const { sku, qty, budget_usd } = await readBody(); return send(200, await runTool('create_checkout', { items: [{ sku, qty: qty || 1 }], budget_usd })); }
+    if (req.method === 'POST' && url.pathname === '/api/checkout') { const { sku, qty, budget_usd, uid } = await readBody(); return send(200, await runTool('create_checkout', { items: [{ sku, qty: qty || 1 }], budget_usd, uid })); }
     if (req.method === 'POST' && url.pathname === '/api/refund') { const { order_id } = await readBody(); return send(200, await runTool('refund_order', { order_id })); }
     if (req.method === 'POST' && url.pathname === '/api/status') { const { order_id } = await readBody(); return send(200, await runTool('order_status', { order_id })); }
     if (req.method === 'POST' && url.pathname === '/api/chat') {
@@ -320,7 +344,7 @@ http.createServer(async (req, res) => {
       try {
         const c = await pp(`/v2/checkout/orders/${id}/capture`, 'POST');
         const cap = c.purchase_units?.[0]?.payments?.captures?.[0];
-        if (orders.has(id)) Object.assign(orders.get(id), { status: c.status, captureId: cap?.id });
+        if (orders.has(id)) { Object.assign(orders.get(id), { status: c.status, captureId: cap?.id, paidAt: Date.now() }); saveOrders(); }
       } catch (e) { console.error(e.message); }
       res.writeHead(302, { Location: `/?paid=${id}` }); return res.end();
     }
