@@ -4,7 +4,7 @@
 
 Built for the **PayPal AI Hackathon** (agentic commerce).
 
-**Demo video:** `<YouTube link>` · **Live demo:** `[<Render URL, if deployed>](https://payagent-q3ql.onrender.com/)`
+**Demo video:** `<YouTube link>` · **Live demo:** "(https://payagent-q3ql.onrender.com/)"
 
 ---
 
